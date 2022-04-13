@@ -379,6 +379,7 @@ void MCDecoderICARUSTPCwROI::produce(art::Event & event, art::ProcessingFrame co
     {
         art::Handle<artdaq::Fragments> daq_handle;
         event.getByLabel(rawDigitLabel, daq_handle);
+	//std::cout << "\nLabel=" << rawDigitLabel << std::endl;
 
         ConcurrentRawDigitCol concurrentRawDigits;
         ConcurrentRawDigitCol concurrentRawRawDigits;
@@ -497,6 +498,56 @@ void MCDecoderICARUSTPCwROI::processSingleLabel(art::Event&                     
     // Require a valid handle
     if (digitVecHandle.isValid() && digitVecHandle->size()>0 )
     {
+        const unsigned int dataSize = art::Ptr<raw::RawDigit>(digitVecHandle,0)->Samples(); //size of raw data vectors
+
+	std::map<unsigned int, std::vector<const raw::RawDigit*> > boardToRawDigitMap;
+	for(size_t idx = 0; idx < digitVecHandle->size(); idx++) {
+	  const raw::RawDigit* rawDigit = &digitVecHandle->at(idx);
+	  raw::ChannelID_t channel = rawDigit->Channel();
+	  ChannelToBoardWirePlaneMap::const_iterator channelToBoardItr = fChannelToBoardWirePlaneMap.find(channel);
+	  if (channelToBoardItr == fChannelToBoardWirePlaneMap.end())
+            {
+	      std::cout << "********************************************************************************" << std::endl;
+	      std::cout << "********* We did not find channel " << channel << "*****************************" << std::endl;
+	      std::cout << "********************************************************************************" << std::endl;
+	      continue;
+            }
+	  unsigned int board = channelToBoardItr->second.first;
+	  auto mapIter = boardToRawDigitMap.find(board);
+	  if (mapIter != boardToRawDigitMap.end()) {
+	    mapIter->second.push_back(rawDigit);
+	  } else {
+	    boardToRawDigitMap.insert({board,std::vector<const raw::RawDigit*>{rawDigit}});
+	  }
+	}
+	//std::cout << "boardToRawDigitMap.size()=" << boardToRawDigitMap.size() << std::endl;
+	//for (auto elem : boardToRawDigitMap) {
+	tbb::parallel_for (static_cast<std::size_t>(0),boardToRawDigitMap.size(),[&](size_t& r) {
+	  auto elem = std::next(boardToRawDigitMap.begin(),r);
+
+	  //std::cout << "board=" << elem->first << " nch=" << elem->second.size() << " first=" << elem->second[0]->Channel() << " last=" << elem->second[elem->second.size()-1]->Channel() << std::endl;
+
+	  std::vector<const raw::RawDigit*>& rawDigitVec = elem->second;
+	  // Sort (use a lambda to sort by channel id)
+	  std::sort(rawDigitVec.begin(),rawDigitVec.end(),[](const raw::RawDigit* left, const raw::RawDigit* right) {return left->Channel() < right->Channel();});
+          ChannelArrayPair chanArr;
+          for (const auto rawDigit : rawDigitVec) {
+	    // Declare a temporary digit holder and resize it if downsizing the waveform
+	    raw::RawDigit::ADCvector_t rawDataVec(dataSize);
+	    // Decompress data into local holder
+	    raw::Uncompress(rawDigit->ADCs(), rawDataVec, rawDigit->Compression());
+	    // Fill into the data structure
+            raw::ChannelID_t channel = rawDigit->Channel();
+            unsigned int planeIdx       = fChannelToBoardWirePlaneMap.find(channel)->second.second.second;
+	    icarus_signal_processing::VectorFloat boardDataVec(dataSize);
+	    for(size_t tick = 0; tick < dataSize; tick++) boardDataVec[tick] = rawDataVec[tick];
+	    chanArr.first.push_back(daq::INoiseFilter::ChannelPlanePair(channel,planeIdx));
+	    chanArr.second.push_back(boardDataVec);
+	  }
+          processSingleImage(clockData, chanArr, coherentNoiseGrouping, concurrentRawDigits, concurrentRawRawDigits, coherentRawDigits, concurrentROIs);
+	});
+
+	    /*
         // Sadly, the RawDigits come to us in an unsorted condition which is not optimal for
         // what we want to do here. So we make a vector of pointers to the input raw digits and sort them
         std::vector<const raw::RawDigit*> rawDigitVec;
@@ -594,7 +645,6 @@ void MCDecoderICARUSTPCwROI::processSingleLabel(art::Event&                     
 
         // Some detector simulations don't output channels that don't have any possibility of signal (ghost channels)
         // Do a cleanup phase here to find these
-        std::cout << "Size of board map: " << boardToChannelArrayPairMap.size() << std::endl;
         for(auto& boardInfo : boardToChannelArrayPairMap)
         {
             if (boardWireCountMap[boardInfo.first] < 64)
@@ -607,7 +657,7 @@ void MCDecoderICARUSTPCwROI::processSingleLabel(art::Event&                     
                 processSingleImage(clockData, boardInfo.second, boardWireCountMap[boardInfo.first], concurrentRawDigits, concurrentRawRawDigits, coherentRawDigits, concurrentROIs);
             }
         }
-
+	    */
     }
 
     theClockProcess.stop();
